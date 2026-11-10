@@ -4,6 +4,8 @@ A **Value Object (VO)** is a small, immutable type that represents a domain conc
 
 VOs replace raw primitives (`String`, `i64`, `bool`, `Option<String>`...) inside the domain. Instead of passing a `String` that *should* be a non-empty key, you pass a `ConfigKey` that *cannot* be anything else.
 
+VOs are the building blocks of aggregate roots (see [Aggregate roots](#aggregate-roots-where-value-objects-live)).
+
 Examples use Rust, but the rules apply to any language.
 
 > **Golden rule: an aggregate root never holds a nullable Value Object.**
@@ -156,6 +158,70 @@ impl ConfigValue {
 ```
 
 The `?` propagates the shared validation. `ConfigValue` can add more rules before or after it.
+
+---
+
+## Aggregate roots: where Value Objects live
+
+An **aggregate** is a cluster of domain objects treated as a single unit whenever its data changes. Its **aggregate root** is the entity at the top of that cluster, and it is the only way in:
+
+- Outside code references, loads, and saves the aggregate **only through its root**.
+- Each aggregate has one repository, and the repository works with whole aggregates.
+
+An aggregate root is an entity, so unlike a VO it has **identity**. Two config entries holding the same value are still different entries if their keys differ. That identity is itself a VO (`ConfigKey`).
+
+| | Value Object | Aggregate root |
+|---|---|---|
+| Identity | None: defined by its value | Yes: an identifier VO |
+| Equality | By value | By identifier |
+| Mutability | Immutable | Its state changes over time, through its own methods |
+| Lifecycle | Created and discarded freely | Created, saved, loaded, modified, and deleted through its repository |
+| Made of | Primitives (or other VOs) | Value Objects (and child entities) |
+
+This section shows the aggregate root only as a **container of Value Objects, with no behaviour**. Behaviour (methods that change state, enforce rules involving several fields, and record domain events) is covered in [Domain Events](domain-events.md).
+
+```rust
+// libs/config/src/config_entry/domain/entities/config_entry.rs
+
+/// Aggregate root. Identified by its `ConfigKey`.
+#[derive(Clone, Debug)]
+pub struct ConfigEntry {
+    key: ConfigKey,     // identity, itself a VO
+    value: ConfigValue, // every other field is a VO too
+}
+
+impl ConfigEntry {
+    /// Receives VOs that are already valid, so it has nothing left to validate field by field.
+    pub fn new(key: ConfigKey, value: ConfigValue) -> Self {
+        Self { key, value }
+    }
+
+    pub fn key(&self) -> &ConfigKey {
+        &self.key
+    }
+
+    pub fn value(&self) -> &ConfigValue {
+        &self.value
+    }
+}
+
+/// Equality by identity, not by value: same key means same entry.
+impl PartialEq for ConfigEntry {
+    fn eq(&self, other: &Self) -> bool {
+        self.key == other.key
+    }
+}
+
+impl Eq for ConfigEntry {}
+```
+
+What the root guarantees about its Value Objects:
+
+- **Every field is a VO.** No raw primitives, and never `Option<VO>` (see [Nullable concepts](#nullable-concepts-null-lives-inside-the-vo-never-around-it)).
+- **Private fields, getters that return VOs.** `entry.key()` returns `&ConfigKey`. Callers unwrap to primitives with `.value()` only at the boundaries (DTOs, persistence, event payloads).
+- **No setters.** State never changes by assigning a field from outside. Changes come only through the root's own behaviour methods.
+- **The identity never changes.** The identifier is set at construction and is never replaced.
+- **Single-field rules live in the VOs.** The constructor receives valid VOs, so it never re-checks emptiness, length, or format. The root is only responsible for rules that involve several of its fields together.
 
 ---
 
@@ -441,6 +507,7 @@ impl ConfigDescriptionMother {
 ## Checklist
 
 - [ ] Every aggregate field is a VO
+- [ ] The aggregate root has private fields, getters that return VOs, no setters, and equality by identity
 - [ ] No `Option<VO>` in aggregates, commands, or queries
 - [ ] Optional concepts use a VO whose constructor accepts `Option<T>`
 - [ ] The constructor validates and returns `Result<Self, ValueObjectValidationError>`
