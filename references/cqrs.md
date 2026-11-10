@@ -80,7 +80,7 @@ CQRS does **not** require separate databases, event sourcing, or asynchronous pr
 5. **One handler per message.** Each command or query type has exactly one handler. (Domain events are the opposite: many subscribers per event.)
 6. **Handlers are thin.** A handler unpacks the message, calls the application service, and maps the result. Business logic lives in aggregates and application services, never in handlers.
 7. **Messages are immutable data carriers.** Commands and queries have no behaviour. Their fields are Value Objects, so an invalid message cannot be built (see [Value Objects](value-objects.md)).
-8. **Handlers never dispatch other commands.** If something must happen after a state change, publish a domain event and react to it.
+8. **Handlers never dispatch other commands.** If something must happen after a state change, publish a domain event and react to it (see [Domain Events](domain-events.md)).
 9. **The bus is a port.** Bus traits live in the shared domain. Implementations (in-memory, broker-backed...) live in infrastructure. Entry points depend only on the traits.
 
 ---

@@ -23,7 +23,7 @@ Examples use Rust, but the rules apply to any language.
 5. **Expose the primitive explicitly.** Provide a `value()` getter. Implement `Display` when the VO has a natural text form.
 6. **One VO per file.** `domain/value_objects/config_key.rs` → `struct ConfigKey`.
 7. **Generic primitives live in a shared crate.** Context-specific VOs reuse them via the newtype pattern.
-8. **Nullability lives inside the VO, never around it.** No `Option<VO>` in aggregates, commands, or events.
+8. **Nullability lives inside the VO, never around it.** No `Option<VO>` in aggregates, commands, or queries.
 9. **No infrastructure in VOs.** A VO knows nothing about HTTP, SQL, or serialization frameworks.
 
 ---
@@ -177,7 +177,7 @@ Why this is wrong:
 
 - **The meaning of "absent" leaks out of the domain concept.** Is `""` a description or no description? With `Option<VO>`, that decision is made by whoever builds the aggregate (the controller, a mapper, the repository), and each one may decide differently.
 - **`None` skips the VO entirely.** Normalization and validation rules never run on the absent path.
-- **Every consumer has to branch.** Getters return `Option<&ConfigDescription>`, and use cases, event factories, mappers, and tests all end up matching on it.
+- **Every consumer has to branch.** Getters return `Option<&ConfigDescription>`, and use cases, event constructors, mappers, and tests all end up matching on it.
 - **It is inconsistent.** Mandatory concepts are VOs, optional concepts are `Option<VO>`. The aggregate's shape now depends on optionality instead of on the domain.
 
 ### ✅ Right: the VO accepts a nullable input
@@ -252,7 +252,9 @@ impl ConfigEntry {
 }
 ```
 
-The same rule applies to commands, queries, and domain events: they carry `ConfigDescription`, never `Option<ConfigDescription>`.
+The same rule applies to commands and queries: they carry `ConfigDescription`, never `Option<ConfigDescription>`.
+
+Domain events are different. Their payload is made of primitives because they leave the domain (see [Domain Events](domain-events.md)), so an optional description travels in an event as `Option<String>`.
 
 ### Where nullable primitives are allowed
 
@@ -263,7 +265,8 @@ Nullable **primitives** are fine at the boundaries, where data enters or leaves 
 | HTTP request / response body | `Option<String>` |
 | Response DTO (`ConfigEntryEntry`) | `Option<String>` |
 | Persistence row / document | `Option<String>` / `NULL` column |
-| Command, query, event | `ConfigDescription` |
+| Domain event payload | `Option<String>` |
+| Command, query | `ConfigDescription` |
 | Aggregate / entity | `ConfigDescription` |
 
 **Entering the domain** (HTTP handler builds the command):
@@ -426,7 +429,7 @@ impl ConfigDescriptionMother {
 | Anti-pattern | Fix |
 |---|---|
 | Raw primitives in aggregates (`key: String`) | Wrap them in a VO (`key: ConfigKey`) |
-| `Option<VO>` in an aggregate, command, or event | Make the VO accept `Option<T>` and model absence internally |
+| `Option<VO>` in an aggregate, command, or query | Make the VO accept `Option<T>` and model absence internally |
 | Constructor that never fails, with validation done elsewhere (controller, service) | Validate inside `new()` and return `Result` |
 | Public inner field (`pub struct ConfigKey(pub String)`) | Private field plus a `value()` getter |
 | Setters or `&mut self` methods on a VO | Build a new VO instead |
@@ -438,7 +441,7 @@ impl ConfigDescriptionMother {
 ## Checklist
 
 - [ ] Every aggregate field is a VO
-- [ ] No `Option<VO>` in aggregates, commands, queries, or events
+- [ ] No `Option<VO>` in aggregates, commands, or queries
 - [ ] Optional concepts use a VO whose constructor accepts `Option<T>`
 - [ ] The constructor validates and returns `Result<Self, ValueObjectValidationError>`
 - [ ] Inner value is private; exposed via `value()`
