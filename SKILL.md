@@ -64,7 +64,7 @@ infrastructure ──► application ──► domain
 
 ### Adding a command use case
 
-Work from the inside out:
+Work from the inside out. Start each file from its template in [assets/templates](assets/templates/README.md) when there is one.
 
 1. **Value Objects** for every new input, each validating in its constructor ([Value Objects](references/value-objects.md)).
 2. **Aggregate behaviour.** A method that enforces the rule, changes state and records a past-tense event; a no-op records nothing ([domain events](references/domain-events.md#the-aggregate-records-its-events)).
@@ -133,6 +133,10 @@ Flag these, in this order of severity:
 - Tests that mock domain code, or literal values that the test is not about.
 
 Each reference ends with a checklist and an anti-pattern table to use for a detailed review.
+
+## Templates
+
+[assets/templates](assets/templates/README.md) has ready-to-copy files with placeholders (`{{Aggregate}}`, `{{concept}}`, `{{verb}}`...). There are templates for every domain building block, the create, change and find use cases, a subscriber, the in-memory adapter, controllers, the composition root, a repository mock, mothers and the standard use case tests. Copy each one to the path in its first line, replace the placeholders, and resolve the `TODO`s.
 
 ## References
 

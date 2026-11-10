@@ -24,6 +24,7 @@ An [Agent Skill](https://agentskills.io) that makes coding agents such as Claude
 | [`references/dependency-injection.md`](references/dependency-injection.md) | Constructor injection, injected buses, the composition root |
 | [`references/domain-events.md`](references/domain-events.md) | Recording, publishing and subscribing to domain events |
 | [`references/testing.md`](references/testing.md) | Mocks, Object Mothers, unit, contract and end-to-end tests |
+| [`assets/templates/`](assets/templates/README.md) | Ready-to-copy Rust files with placeholders, from Value Objects to controllers and tests |
 
 ## Installation
 
