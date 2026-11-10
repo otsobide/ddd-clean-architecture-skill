@@ -16,6 +16,20 @@ Examples use Rust, but the rules apply to any language.
 
 ---
 
+## Table of contents
+
+- [Rules](#rules)
+- [Basic VO: validated newtype](#basic-vo-validated-newtype)
+- [Shared primitives and composition](#shared-primitives-and-composition)
+- [Aggregate roots: where Value Objects live](#aggregate-roots-where-value-objects-live)
+- [Nullable concepts: null lives inside the VO, never around it](#nullable-concepts-null-lives-inside-the-vo-never-around-it)
+- [Identifiers are Value Objects too](#identifiers-are-value-objects-too)
+- [Testing Value Objects](#testing-value-objects)
+- [Anti-patterns](#anti-patterns)
+- [Checklist](#checklist)
+
+---
+
 ## Rules
 
 1. **Every aggregate field is a VO.** No raw primitives as fields of entities or aggregates.
