@@ -75,11 +75,12 @@ Domain events decouple the code that changes state from the code that reacts to 
 6. **Self-contained payload.** The event carries everything a subscriber typically needs, so subscribers don't have to query back the producer.
 7. **Stable event name.** Each event has a constant name `<context>.<aggregate>.<past_verb>` (for example `catalog.product.created`). It identifies the event outside the process: logs, brokers, stored events.
 8. **Reconstitution records nothing.** Rebuilding an aggregate from storage must not record events. Only real state changes do.
-9. **Subscribers live in the consuming context.** The context that reacts owns the subscriber, never the context that publishes.
+9. **Subscribers live in the consuming module.** The module (or context) that reacts owns the subscriber, never the one that publishes.
 10. **Subscribers are thin.** They translate the event into a call to an application service, the same way command handlers do.
 11. **Subscribers are idempotent.** The same event may be delivered more than once. Processing it twice must have the same effect as processing it once.
 12. **A subscriber failure never fails the publisher.** The fact already happened. Delivery problems are the bus's responsibility: log, retry, or use an outbox.
 13. **Events are not for invariants.** Rules that must hold atomically belong in the aggregate. Events drive side effects and eventual consistency.
+14. **The event type lives where all its users can import it.** That is the publishing module, then the context's `shared` module, then `libs/shared`, as more modules and contexts start using it.
 
 ---
 
@@ -104,21 +105,28 @@ CreateProductCommandHandler
 ## Layout and naming
 
 ```
-catalog/                                         # producing context
-└── product/
-    └── domain/
-        ├── product.rs                           # aggregate: records events
-        └── events/
-            ├── product_created_event.rs
-            └── product_renamed_event.rs
-
-analytics/                                       # consuming context
-└── products_counter/
+libs/catalog/src/                                # bounded context
+├── shared/
+│   └── domain/events/
+│       └── product_created_event.rs             # used by two modules: lives in the context's shared module
+├── product/                                     # publishing module
+│   └── domain/
+│       ├── entities/product.rs                  # aggregate: records events
+│       └── events/product_renamed_event.rs      # used only by this module (for now)
+└── products_counter/                            # consuming module
     └── application/
         └── increment_products_counter_on_product_created/
             ├── increment_products_counter_on_product_created.rs   # subscriber
             └── products_counter_incrementer.rs                    # application service
 ```
+
+Where an event type lives depends on who uses it:
+
+- **Only the publishing module:** in that module's `domain/events/`.
+- **Another module of the same context subscribes:** it moves to the context's `shared/domain/events/`.
+- **Another bounded context subscribes:** it moves to `libs/shared`.
+
+See [Project Structure](project-structure.md) for the rule behind this.
 
 | Concept | Pattern | Example |
 |---|---|---|
@@ -321,7 +329,7 @@ The in-memory bus is in-process and sequential: `publish` returns after every su
 ## Defining an event
 
 ```rust
-// catalog/product/domain/events/product_created_event.rs
+// libs/catalog/src/shared/domain/events/product_created_event.rs
 
 use std::time::SystemTime;
 
@@ -333,10 +341,10 @@ pub struct ProductCreatedEvent {
 impl ProductCreatedEvent {
     pub const EVENT_NAME: &'static str = "catalog.product.created";
 
-    pub fn new(id: &ProductId, name: &ProductName) -> Self {
+    pub fn new(product_id: impl Into<String>, name: impl Into<String>) -> Self {
         Self {
-            metadata: DomainEventMetadata::new(id.value()),
-            name: name.value().to_string(),
+            metadata: DomainEventMetadata::new(product_id),
+            name: name.into(),
         }
     }
 }
@@ -360,7 +368,7 @@ impl DomainEvent for ProductCreatedEvent {
 }
 ```
 
-The constructor accepts Value Objects because it is called from inside the domain. It stores primitives because the event leaves the domain.
+Both the constructor and the payload use primitives. The event depends on no module's Value Objects, so it can move to a shared module unchanged.
 
 An event about a change carries both sides of it when subscribers need them:
 
@@ -379,7 +387,7 @@ pub struct ProductRenamedEvent {
 The aggregate keeps a private list of recorded events. Every state-changing method records the event that describes the change. The application service later takes them with `pull_domain_events()`.
 
 ```rust
-// catalog/product/domain/product.rs
+// libs/catalog/src/product/domain/entities/product.rs
 
 pub struct Product {
     id: ProductId,
@@ -391,7 +399,7 @@ impl Product {
     /// A brand-new product: records `ProductCreatedEvent`.
     pub fn create(id: ProductId, name: ProductName) -> Self {
         let mut product = Self::reconstitute(id, name);
-        product.record(ProductCreatedEvent::new(&product.id, &product.name));
+        product.record(ProductCreatedEvent::new(product.id.value(), product.name.value()));
         product
     }
 
@@ -405,7 +413,7 @@ impl Product {
             return; // nothing changed, nothing happened
         }
         let previous = std::mem::replace(&mut self.name, name);
-        self.record(ProductRenamedEvent::new(&self.id, &previous, &self.name));
+        self.record(ProductRenamedEvent::new(self.id.value(), previous.value(), self.name.value()));
     }
 
     /// Hands over the recorded events and clears them, so they are published once.
@@ -434,7 +442,7 @@ Two named constructors make rule 8 explicit: `create` means "this is happening n
 ## Publishing from the application service
 
 ```rust
-// catalog/product/application/create_product/product_creator.rs
+// libs/catalog/src/product/application/create_product/product_creator.rs
 
 pub struct ProductCreator {
     repository: Arc<dyn ProductRepository>,
@@ -463,10 +471,10 @@ A use case that modifies an existing aggregate follows the same shape: load, cal
 
 ## Subscribers
 
-A subscriber reacts to one event type and delegates to an application service of its own context. It takes primitives from the event and builds its own context's Value Objects.
+A subscriber reacts to one event type and delegates to an application service of its own module. It takes primitives from the event and builds its own module's Value Objects.
 
 ```rust
-// analytics/products_counter/application/increment_products_counter_on_product_created/
+// libs/catalog/src/products_counter/application/increment_products_counter_on_product_created/
 //     increment_products_counter_on_product_created.rs
 
 pub struct IncrementProductsCounterOnProductCreated {
@@ -492,7 +500,7 @@ impl DomainEventSubscriber<ProductCreatedEvent> for IncrementProductsCounterOnPr
 The application service is where idempotency lives. Here the counter remembers which events it has already counted:
 
 ```rust
-// analytics/products_counter/application/increment_products_counter_on_product_created/
+// libs/catalog/src/products_counter/application/increment_products_counter_on_product_created/
 //     products_counter_incrementer.rs
 
 pub struct ProductsCounterIncrementer {
@@ -625,8 +633,9 @@ fn it_records_nothing_when_renamed_to_the_same_name() {
 | Building events in the application service | The aggregate records them inside its behaviour |
 | Events carrying Value Objects or entities | Primitive payload; consumers build their own VOs |
 | Recording events when loading from storage | Separate `create` (records) from `reconstitute` (records nothing) |
-| Business logic inside a subscriber | Delegate to an application service in the consuming context |
-| Subscriber placed in the producing context | It belongs to the context that reacts |
+| Business logic inside a subscriber | Delegate to an application service in the consuming module |
+| Subscriber placed in the publishing module | It belongs to the module that reacts |
+| Consumer importing the event from the publishing module | Move the event to the context's `shared` module (or `libs/shared` across contexts) |
 | Non-idempotent subscriber | Deduplicate by `event_id` or make the effect naturally idempotent |
 | Failing the command because a subscriber failed | The bus isolates subscriber failures; the fact already happened |
 | Using events to enforce an invariant that must be atomic | Enforce it inside the aggregate |
@@ -642,7 +651,8 @@ fn it_records_nothing_when_renamed_to_the_same_name() {
 - [ ] The aggregate records the event inside the behaviour that changes state; no-op changes record nothing
 - [ ] `reconstitute` records nothing
 - [ ] The application service saves first, then publishes `pull_domain_events()`
-- [ ] The subscriber lives in the consuming context, is named `ReactionOnNounPast`, and delegates to an application service
+- [ ] The event type lives in the publishing module, the context's `shared` module, or `libs/shared`, depending on who uses it
+- [ ] The subscriber lives in the consuming module, is named `ReactionOnNounPast`, and delegates to an application service
 - [ ] The subscriber is idempotent
 - [ ] The subscriber is registered on the bus in the composition root
 - [ ] Tests cover recording, publish-after-save, nothing published on failure, and duplicate delivery
