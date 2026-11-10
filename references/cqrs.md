@@ -80,7 +80,11 @@ CQRS does **not** require separate databases, event sourcing, or asynchronous pr
 5. **One handler per message.** Each command or query type has exactly one handler. (Domain events are the opposite: many subscribers per event.)
 6. **Handlers are thin.** A handler unpacks the message, calls the application service, and maps the result. Business logic lives in aggregates and application services, never in handlers.
 7. **Messages are immutable data carriers.** Commands and queries have no behaviour. Their fields are Value Objects, so an invalid message cannot be built (see [Value Objects](value-objects.md)).
-8. **Handlers never dispatch other commands.** If something must happen after a state change, publish a domain event and react to it (see [Domain Events](domain-events.md)).
+8. **Modules talk through the buses.** A use case never calls another module's application service or repository.
+   - To read another module's data, it asks a query through an injected `QueryBus`.
+   - To make another module act, it publishes a domain event (preferred) or dispatches a command through an injected `CommandBus`.
+
+   The buses are injected into the application service, never into the handler (see [Dependency Injection](dependency-injection.md)).
 9. **The bus is a port.** Bus traits live in the shared domain. Implementations (in-memory, broker-backed...) live in infrastructure. Entry points depend only on the traits.
 
 ---
@@ -286,36 +290,40 @@ use std::any::{type_name, Any, TypeId};
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
 
 type HandlerFuture = Pin<Box<dyn Future<Output = Result<(), CommandBusError>> + Send>>;
-type HandlerFn = Box<dyn Fn(Box<dyn Any + Send + Sync>) -> HandlerFuture + Send + Sync>;
+type HandlerFn = Arc<dyn Fn(Box<dyn Any + Send + Sync>) -> HandlerFuture + Send + Sync>;
 
 pub struct InMemoryCommandBus {
-    handlers: HashMap<TypeId, HandlerFn>,
+    handlers: RwLock<HashMap<TypeId, HandlerFn>>,
 }
 
 impl InMemoryCommandBus {
     pub fn new() -> Self {
-        Self { handlers: HashMap::new() }
+        Self { handlers: RwLock::new(HashMap::new()) }
     }
 
-    pub fn register<C, H>(&mut self, handler: H) -> Result<(), CommandBusError>
+    /// Registers through `&self`, so the bus can be shared (`Arc`) and injected into
+    /// services before its handlers are registered (see Dependency Injection).
+    pub fn register<C, H>(&self, handler: H) -> Result<(), CommandBusError>
     where
         C: Command,
         H: CommandHandler<C> + 'static,
     {
+        let mut handlers = self.handlers.write().expect("command bus lock poisoned");
+
         let type_id = TypeId::of::<C>();
-        if self.handlers.contains_key(&type_id) {
+        if handlers.contains_key(&type_id) {
             return Err(CommandBusError::HandlerAlreadyRegistered(type_name::<C>()));
         }
 
         let handler = Arc::new(handler);
-        self.handlers.insert(
+        handlers.insert(
             type_id,
-            Box::new(move |command| {
+            Arc::new(move |command| {
                 let handler = Arc::clone(&handler);
                 Box::pin(async move {
                     let command = command
@@ -338,9 +346,14 @@ impl CommandBus for InMemoryCommandBus {
         // Call through `as_ref()`: on a `Box<dyn Command>` the blanket impl would
         // otherwise resolve to the Box itself and return the Box's TypeId.
         let command_ref: &dyn Command = command.as_ref();
+        // Clone the handler out of the lock: the lock is released before awaiting,
+        // so a handler can dispatch another command on this same bus.
         let handler = self
             .handlers
+            .read()
+            .expect("command bus lock poisoned")
             .get(&command_ref.command_type_id())
+            .cloned()
             .ok_or_else(|| CommandBusError::HandlerNotFound(command_ref.command_name()))?;
 
         handler(command.into_any()).await
@@ -507,12 +520,12 @@ Handlers are built and registered once, at startup, in a single place: the compo
 ```rust
 let repository: Arc<dyn ProductRepository> = Arc::new(InMemoryProductRepository::new());
 
-let mut command_bus = InMemoryCommandBus::new();
+let command_bus = InMemoryCommandBus::new();
 command_bus
     .register(CreateProductCommandHandler::new(ProductCreator::new(Arc::clone(&repository))))
     .expect("CreateProductCommandHandler registered twice");
 
-let mut query_bus = InMemoryQueryBus::new();
+let query_bus = InMemoryQueryBus::new();
 query_bus
     .register(FindProductQueryHandler::new(ProductFinder::new(Arc::clone(&repository))))
     .expect("FindProductQueryHandler registered twice");
@@ -524,6 +537,8 @@ let query_bus: Arc<dyn QueryBus> = Arc::new(query_bus);
 The command or query type is inferred from the handler's `CommandHandler<C>` / `QueryHandler<Q>` impl, so `register` needs no turbofish.
 
 Registering a handler twice is a wiring bug, so failing fast at startup with `expect` is correct.
+
+When an application service needs a bus itself (to ask a query, dispatch a command, or publish events), create the buses first as `Arc`, inject them, and register the handlers last. See [Dependency Injection](dependency-injection.md).
 
 ---
 
@@ -622,7 +637,7 @@ The response downcast cannot fail when the wiring is correct: each query type ha
 | Business rules inside a handler | Move them to the aggregate or the application service |
 | Query handler returning an aggregate | Map it to a response DTO of primitives |
 | One handler for several messages, or several handlers for one message | Exactly one handler per command or query |
-| Handler dispatching another command | Publish a domain event and react with a subscriber |
+| A use case calling another module's application service or repository | Ask a query or dispatch a command through an injected bus, or react to a domain event |
 | Entry point calling the application service directly | Go through the bus, so entry points depend only on bus traits and messages |
 | Command or query fields as raw primitives | Use Value Objects, so invalid messages cannot exist |
 

@@ -254,33 +254,37 @@ use std::any::{Any, TypeId};
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
 use tracing::error;
 
 type SubscriberFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
-type SubscriberFn = Box<dyn Fn(Arc<dyn Any + Send + Sync>) -> SubscriberFuture + Send + Sync>;
+type SubscriberFn = Arc<dyn Fn(Arc<dyn Any + Send + Sync>) -> SubscriberFuture + Send + Sync>;
 
 pub struct InMemoryEventBus {
-    subscribers: HashMap<TypeId, Vec<SubscriberFn>>,
+    subscribers: RwLock<HashMap<TypeId, Vec<SubscriberFn>>>,
 }
 
 impl InMemoryEventBus {
     pub fn new() -> Self {
-        Self { subscribers: HashMap::new() }
+        Self { subscribers: RwLock::new(HashMap::new()) }
     }
 
-    pub fn subscribe<E, S>(&mut self, subscriber: S)
+    /// Subscribes through `&self`, so the bus can be shared (`Arc`) and injected into
+    /// services before its subscribers are registered (see Dependency Injection).
+    pub fn subscribe<E, S>(&self, subscriber: S)
     where
         E: DomainEvent,
         S: DomainEventSubscriber<E> + 'static,
     {
         let subscriber = Arc::new(subscriber);
         self.subscribers
+            .write()
+            .expect("event bus lock poisoned")
             .entry(TypeId::of::<E>())
             .or_default()
-            .push(Box::new(move |event| {
+            .push(Arc::new(move |event| {
                 let subscriber = Arc::clone(&subscriber);
                 Box::pin(async move {
                     let event = event
@@ -306,11 +310,15 @@ impl EventBus for InMemoryEventBus {
         for event in events {
             let event: Arc<dyn DomainEvent> = Arc::from(event);
 
-            // Call through `as_ref()`: see the pitfall below.
-            let Some(subscribers) = self.subscribers.get(&event.as_ref().domain_event_type_id())
-            else {
-                continue;
-            };
+            // Call through `as_ref()` (see the pitfall below), and clone the subscribers
+            // out of the lock so it is released before awaiting them.
+            let subscribers: Vec<SubscriberFn> = self
+                .subscribers
+                .read()
+                .expect("event bus lock poisoned")
+                .get(&event.as_ref().domain_event_type_id())
+                .cloned()
+                .unwrap_or_default();
 
             for subscriber in subscribers {
                 subscriber(Arc::clone(&event).into_any_arc()).await;
@@ -533,13 +541,13 @@ impl ProductsCounterIncrementer {
 
 ## Wiring: the composition root
 
-Subscribers are registered on the bus at startup, before the bus is shared. Then the bus is injected into the application services that publish.
+Subscribers are registered on the bus at startup, and the bus is injected into the application services that publish. When a subscriber's own service needs a bus (to publish further events or dispatch a command), create the buses first and register last. See [Dependency Injection](dependency-injection.md).
 
 ```rust
 let counter_repository: Arc<dyn ProductsCounterRepository> =
     Arc::new(InMemoryProductsCounterRepository::new());
 
-let mut event_bus = InMemoryEventBus::new();
+let event_bus = InMemoryEventBus::new();
 event_bus.subscribe(IncrementProductsCounterOnProductCreated::new(
     ProductsCounterIncrementer::new(Arc::clone(&counter_repository)),
 ));
