@@ -64,7 +64,8 @@ How the codebase is laid out: a Cargo workspace of **bounded contexts** (library
 │   └── shared/                         # SHARED BETWEEN CONTEXTS (imported by several contexts)
 │       ├── cqrs/                       # crate: command/query buses
 │       ├── domain-events/              # crate: DomainEvent, EventBus
-│       └── valueobject/                # crate: generic Value Object primitives
+│       ├── valueobject/                # crate: generic Value Object primitives
+│       └── testing/                    # crate: primitive mothers, mocks of shared ports (dev-dependency only)
 │
 └── tests/
     ├── apps/catalog_api/               # end-to-end tests of the app
@@ -337,10 +338,11 @@ tests/
 ├── libs/catalog/                       # unit tests of the catalog context
 │   ├── tests.rs                        # test crate root
 │   └── src/
-│       ├── mocks/                      # hand-written mocks of ports
+│       ├── mocks/                      # hand-written mocks of this context's ports
 │       ├── product/
-│       │   ├── domain/                 # Object Mothers, aggregate tests
-│       │   └── application/create_product/product_creator_tests.rs
+│       │   ├── domain/                 # Object Mothers, VO and aggregate tests
+│       │   ├── application/create_product/product_creator_tests.rs
+│       │   └── infrastructure/         # adapter contract tests
 │       └── products_counter/...
 └── apps/catalog_api/                   # end-to-end tests through the app's routes
     ├── tests.rs
@@ -356,7 +358,7 @@ name = "catalog"
 path = "../../tests/libs/catalog/tests.rs"
 ```
 
-Because the tests are an external crate, they can only reach the context's public API, just like a real consumer.
+Because the tests are an external crate, they can only reach the context's public API, just like a real consumer. See [Testing](testing.md) for mocks, Object Mothers and what to test in each layer.
 
 ---
 
