@@ -110,8 +110,10 @@ product/
 │   ├── entities/            # aggregate root (product.rs) and child entities
 │   ├── value_objects/       # ProductName, ProductPrice...
 │   ├── repositories/        # ProductRepository trait (port)
+│   ├── ports/               # other driven ports (external services), if any
 │   ├── events/              # events only this module uses
-│   └── errors/              # ProductError
+│   ├── errors/              # ProductError
+│   └── services/            # domain services shared by several use cases
 ├── application/
 │   ├── create_product/      # one folder per use case (see CQRS)
 │   ├── find_product/
@@ -128,11 +130,11 @@ product/
 
 ## Layers inside a module
 
-This is hexagonal architecture (ports and adapters) applied per module.
+This is hexagonal architecture (ports and adapters) applied per module. See [Hexagonal Architecture](hexagonal-architecture.md) for the layers in depth, dependency inversion, use cases and domain services.
 
 | Layer | Contains | May depend on |
 |---|---|---|
-| `domain/` | Aggregate roots, entities, Value Objects, repository traits (ports), domain events, domain errors | Only domain code: its own and `shared/domain` (plus the `libs/shared` domain crates). No frameworks, no I/O |
+| `domain/` | Aggregate roots, entities, Value Objects, repository traits and other ports, domain events, domain errors, domain services | Only domain code: its own and `shared/domain` (plus the `libs/shared` domain crates). No frameworks, no I/O |
 | `application/` | Use cases: commands, queries, handlers, application services, responses, event subscribers | `domain/` |
 | `infrastructure/` | Adapters: repository implementations, external API clients, bus implementations | `domain/`, `application/`, and external crates (sqlx, reqwest...) |
 

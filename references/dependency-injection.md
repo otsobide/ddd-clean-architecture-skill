@@ -70,8 +70,9 @@ Generic parameters spread to every type that holds the service (handlers, buses,
 
 | Component | Receives | Never receives |
 |---|---|---|
-| Command application service | Its module's repository traits, `EventBus`; when needed `QueryBus`, `CommandBus`, and ports for external services | Another module's repositories or services |
-| Query application service | Its module's repository traits; when needed `QueryBus` | `EventBus`, `CommandBus` (queries have no side effects) |
+| Command application service | Its module's repository traits and domain services, `EventBus`; when needed `QueryBus`, `CommandBus`, and ports for external services | Another module's repositories or services; other application services |
+| Query application service | Its module's repository traits and domain services; when needed `QueryBus` | `EventBus`, `CommandBus` (queries have no side effects) |
+| Domain service | Its module's ports (`Arc<dyn Trait>`) and other domain services | Buses, application services |
 | Command / query handler | Its application service, by value (one handler, one service) | Repositories or buses directly |
 | Event subscriber | Its application service, by value | Repositories or buses directly |
 | Repository adapter | Infrastructure resources: connection pool, client, configuration | Application services, buses |
@@ -221,7 +222,7 @@ libs/catalog/src/
 │       ├── create_product_command_handler.rs
 │       └── product_creator.rs
 └── products_import/
-    ├── domain/products_source.rs                               # port: where the rows come from
+    ├── domain/ports/products_source.rs                         # port: where the rows come from
     └── application/import_products/
         ├── import_products_command.rs
         ├── import_products_command_handler.rs
