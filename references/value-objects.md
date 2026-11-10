@@ -2,7 +2,7 @@
 
 A **Value Object (VO)** is a small, immutable type that represents a domain concept defined entirely by its value. It has no identity: two VOs holding the same value are equal and interchangeable.
 
-VOs replace raw primitives (`String`, `i64`, `bool`, `Option<String>`...) inside the domain. Instead of passing a `String` that *should* be a non-empty key, you pass a `ConfigKey` that *cannot* be anything else.
+VOs replace raw primitives (`String`, `i64`, `bool`, `Option<String>`...) inside the domain. Instead of passing a `String` that *should* be a valid product name, you pass a `ProductName` that *cannot* be anything else.
 
 VOs are the building blocks of aggregate roots (see [Aggregate roots](#aggregate-roots-where-value-objects-live)).
 
@@ -37,7 +37,7 @@ Examples use Rust, but the rules apply to any language.
 3. **Immutable.** Private inner value, no setters, no `pub` fields. To "change" a VO, build a new one.
 4. **Equality by value.** Derive `PartialEq`, `Eq` (and `Hash` when used as a key or identifier).
 5. **Expose the primitive explicitly.** Provide a `value()` getter. Implement `Display` when the VO has a natural text form.
-6. **One VO per file.** `domain/value_objects/config_key.rs` → `struct ConfigKey`.
+6. **One VO per file.** `domain/value_objects/product_name.rs` → `struct ProductName`.
 7. **Generic primitives live in a shared crate.** Context-specific VOs reuse them via the newtype pattern.
 8. **Nullability lives inside the VO, never around it.** No `Option<VO>` in aggregates, commands, or queries.
 9. **No infrastructure in VOs.** A VO knows nothing about HTTP, SQL, or serialization frameworks.
@@ -46,32 +46,32 @@ Examples use Rust, but the rules apply to any language.
 
 ## Basic VO: validated newtype
 
-`ConfigKey` is the identifier of the `ConfigEntry` aggregate. It must not be blank and has a maximum length.
+`ProductName` is the name of the `Product` aggregate. It must not be blank and has a maximum length.
 
 ```rust
-// libs/config/src/config_entry/domain/value_objects/config_key.rs
+// libs/catalog/src/product/domain/value_objects/product_name.rs
 
 use shared_valueobject::domain::errors::value_object_validation_error::ValueObjectValidationError;
 
-/// Unique key that identifies a ConfigEntry.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct ConfigKey(String);
+/// Name of a product, as shown to customers.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProductName(String);
 
-impl ConfigKey {
-    const MAX_LENGTH: usize = 128;
+impl ProductName {
+    const MAX_LENGTH: usize = 100;
 
     pub fn new(value: impl Into<String>) -> Result<Self, ValueObjectValidationError> {
         let value = value.into();
 
         if value.trim().is_empty() {
             return Err(ValueObjectValidationError::new(
-                "config key cannot be empty".to_string(),
+                "product name cannot be empty".to_string(),
             ));
         }
 
-        if value.len() > Self::MAX_LENGTH {
+        if value.chars().count() > Self::MAX_LENGTH {
             return Err(ValueObjectValidationError::new(format!(
-                "config key cannot exceed {} characters",
+                "product name cannot exceed {} characters",
                 Self::MAX_LENGTH
             )));
         }
@@ -84,7 +84,7 @@ impl ConfigKey {
     }
 }
 
-impl std::fmt::Display for ConfigKey {
+impl std::fmt::Display for ProductName {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.0)
     }
@@ -93,8 +93,8 @@ impl std::fmt::Display for ConfigKey {
 
 What this buys you:
 
-- A function that receives a `ConfigKey` never has to check for emptiness again.
-- `ConfigKey` and `ConfigValue` are different types, so the compiler rejects swapping them by mistake.
+- A function that receives a `ProductName` never has to check for emptiness or length again.
+- `ProductId` and `ProductName` are different types, so the compiler rejects swapping them by mistake.
 - Validation rules for the concept live in exactly one place.
 
 ---
@@ -150,19 +150,31 @@ impl StringValueObject {
 }
 ```
 
+The same `ProductName`, built on the shared primitive: the shared crate owns "not blank", and `ProductName` adds only its own length rule.
+
 ```rust
-// libs/config/src/config_entry/domain/value_objects/config_value.rs
+// libs/catalog/src/product/domain/value_objects/product_name.rs
 
 use shared_valueobject::domain::errors::value_object_validation_error::ValueObjectValidationError;
 use shared_valueobject::domain::strings::string_value_object::StringValueObject;
 
-/// Value stored under a ConfigKey.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ConfigValue(StringValueObject);
+pub struct ProductName(StringValueObject);
 
-impl ConfigValue {
+impl ProductName {
+    const MAX_LENGTH: usize = 100;
+
     pub fn new(value: impl Into<String>) -> Result<Self, ValueObjectValidationError> {
-        Ok(Self(StringValueObject::new(value)?))
+        let value = StringValueObject::new(value)?; // shared rule: not blank
+
+        if value.value().chars().count() > Self::MAX_LENGTH {
+            return Err(ValueObjectValidationError::new(format!(
+                "product name cannot exceed {} characters",
+                Self::MAX_LENGTH
+            )));
+        }
+
+        Ok(Self(value))
     }
 
     pub fn value(&self) -> &str {
@@ -171,7 +183,7 @@ impl ConfigValue {
 }
 ```
 
-The `?` propagates the shared validation. `ConfigValue` can add more rules before or after it.
+The `?` propagates the shared validation. The VO can add more rules before or after it.
 
 ---
 
@@ -182,7 +194,7 @@ An **aggregate** is a cluster of domain objects treated as a single unit wheneve
 - Outside code references, loads, and saves the aggregate **only through its root**.
 - Each aggregate has one repository, and the repository works with whole aggregates.
 
-An aggregate root is an entity, so unlike a VO it has **identity**. Two config entries holding the same value are still different entries if their keys differ. That identity is itself a VO (`ConfigKey`).
+An aggregate root is an entity, so unlike a VO it has **identity**. Two products with the same name are still different products if their ids differ. That identity is itself a VO (`ProductId`).
 
 | | Value Object | Aggregate root |
 |---|---|---|
@@ -192,47 +204,46 @@ An aggregate root is an entity, so unlike a VO it has **identity**. Two config e
 | Lifecycle | Created and discarded freely | Created, saved, loaded, modified, and deleted through its repository |
 | Made of | Primitives (or other VOs) | Value Objects (and child entities) |
 
-This section shows the aggregate root only as a **container of Value Objects, with no behaviour**. Behaviour (methods that change state, enforce rules involving several fields, and record domain events) is covered in [Domain Events](domain-events.md).
+This section shows the aggregate root only as a **container of Value Objects, with no behaviour**. Behaviour (methods that change state, enforce rules involving several fields, and record domain events) is covered in [Domain Events](domain-events.md), where `create` also records a `ProductCreatedEvent` and a second constructor, `reconstitute`, rebuilds stored products.
 
 ```rust
-// libs/config/src/config_entry/domain/entities/config_entry.rs
+// libs/catalog/src/product/domain/entities/product.rs
 
-/// Aggregate root. Identified by its `ConfigKey`.
-#[derive(Clone, Debug)]
-pub struct ConfigEntry {
-    key: ConfigKey,     // identity, itself a VO
-    value: ConfigValue, // every other field is a VO too
+/// Aggregate root. Identified by its `ProductId`.
+pub struct Product {
+    id: ProductId,     // identity, itself a VO
+    name: ProductName, // every other field is a VO too
 }
 
-impl ConfigEntry {
+impl Product {
     /// Receives VOs that are already valid, so it has nothing left to validate field by field.
-    pub fn new(key: ConfigKey, value: ConfigValue) -> Self {
-        Self { key, value }
+    pub fn create(id: ProductId, name: ProductName) -> Self {
+        Self { id, name }
     }
 
-    pub fn key(&self) -> &ConfigKey {
-        &self.key
+    pub fn id(&self) -> &ProductId {
+        &self.id
     }
 
-    pub fn value(&self) -> &ConfigValue {
-        &self.value
+    pub fn name(&self) -> &ProductName {
+        &self.name
     }
 }
 
-/// Equality by identity, not by value: same key means same entry.
-impl PartialEq for ConfigEntry {
+/// Equality by identity, not by value: same id means same product.
+impl PartialEq for Product {
     fn eq(&self, other: &Self) -> bool {
-        self.key == other.key
+        self.id == other.id
     }
 }
 
-impl Eq for ConfigEntry {}
+impl Eq for Product {}
 ```
 
 What the root guarantees about its Value Objects:
 
 - **Every field is a VO.** No raw primitives, and never `Option<VO>` (see [Nullable concepts](#nullable-concepts-null-lives-inside-the-vo-never-around-it)).
-- **Private fields, getters that return VOs.** `entry.key()` returns `&ConfigKey`. Callers unwrap to primitives with `.value()` only at the boundaries (DTOs, persistence, event payloads).
+- **Private fields, getters that return VOs.** `product.name()` returns `&ProductName`. Callers unwrap to primitives with `.value()` only at the boundaries (DTOs, persistence, event payloads).
 - **No setters.** State never changes by assigning a field from outside. Changes come only through the root's own behaviour methods.
 - **The identity never changes.** The identifier is set at construction and is never replaced.
 - **Single-field rules live in the VOs.** The constructor receives valid VOs, so it never re-checks emptiness, length, or format. The root is only responsible for rules that involve several of its fields together.
@@ -241,15 +252,15 @@ What the root guarantees about its Value Objects:
 
 ## Nullable concepts: null lives inside the VO, never around it
 
-Some domain concepts are optional. Say a `ConfigEntry` can have a description, but doesn't have to.
+Some domain concepts are optional. Say a `Product` can have a description, but doesn't have to.
 
 ### ❌ Wrong: nullable VO in the aggregate
 
 ```rust
-pub struct ConfigEntry {
-    key: ConfigKey,
-    value: ConfigValue,
-    description: Option<ConfigDescription>, // ❌ never do this
+pub struct Product {
+    id: ProductId,
+    name: ProductName,
+    description: Option<ProductDescription>, // ❌ never do this
 }
 ```
 
@@ -257,24 +268,24 @@ Why this is wrong:
 
 - **The meaning of "absent" leaks out of the domain concept.** Is `""` a description or no description? With `Option<VO>`, that decision is made by whoever builds the aggregate (the controller, a mapper, the repository), and each one may decide differently.
 - **`None` skips the VO entirely.** Normalization and validation rules never run on the absent path.
-- **Every consumer has to branch.** Getters return `Option<&ConfigDescription>`, and use cases, event constructors, mappers, and tests all end up matching on it.
+- **Every consumer has to branch.** Getters return `Option<&ProductDescription>`, and use cases, event constructors, mappers, and tests all end up matching on it.
 - **It is inconsistent.** Mandatory concepts are VOs, optional concepts are `Option<VO>`. The aggregate's shape now depends on optionality instead of on the domain.
 
 ### ✅ Right: the VO accepts a nullable input
 
 ```rust
-// libs/config/src/config_entry/domain/value_objects/config_description.rs
+// libs/catalog/src/product/domain/value_objects/product_description.rs
 
 use shared_valueobject::domain::errors::value_object_validation_error::ValueObjectValidationError;
 
-/// Optional human-readable description of a ConfigEntry.
+/// Optional description of a product.
 ///
 /// Absence is a valid state of this VO, not of the aggregate.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ConfigDescription(Option<String>);
+pub struct ProductDescription(Option<String>);
 
-impl ConfigDescription {
-    const MAX_LENGTH: usize = 512;
+impl ProductDescription {
+    const MAX_LENGTH: usize = 1000;
 
     /// Accepts a nullable input. The VO, not the caller, decides what "absent" means.
     pub fn new(value: Option<String>) -> Result<Self, ValueObjectValidationError> {
@@ -282,8 +293,8 @@ impl ConfigDescription {
             None => Ok(Self(None)),
             // Domain decision owned by the VO: a blank description means no description.
             Some(v) if v.trim().is_empty() => Ok(Self(None)),
-            Some(v) if v.len() > Self::MAX_LENGTH => Err(ValueObjectValidationError::new(
-                format!("config description cannot exceed {} characters", Self::MAX_LENGTH),
+            Some(v) if v.chars().count() > Self::MAX_LENGTH => Err(ValueObjectValidationError::new(
+                format!("product description cannot exceed {} characters", Self::MAX_LENGTH),
             )),
             Some(v) => Ok(Self(Some(v))),
         }
@@ -304,35 +315,34 @@ impl ConfigDescription {
 ```
 
 ```rust
-// libs/config/src/config_entry/domain/entities/config_entry.rs
+// libs/catalog/src/product/domain/entities/product.rs
 
-#[derive(Clone)]
-pub struct ConfigEntry {
-    key: ConfigKey,
-    value: ConfigValue,
-    description: ConfigDescription, // ✅ always present; it may *contain* nothing
+pub struct Product {
+    id: ProductId,
+    name: ProductName,
+    description: ProductDescription, // ✅ always present; it may *contain* nothing
 }
 
-impl ConfigEntry {
-    pub fn new(key: ConfigKey, value: ConfigValue, description: ConfigDescription) -> Self {
-        Self { key, value, description }
+impl Product {
+    pub fn create(id: ProductId, name: ProductName, description: ProductDescription) -> Self {
+        Self { id, name, description }
     }
 
-    pub fn key(&self) -> &ConfigKey {
-        &self.key
+    pub fn id(&self) -> &ProductId {
+        &self.id
     }
 
-    pub fn value(&self) -> &ConfigValue {
-        &self.value
+    pub fn name(&self) -> &ProductName {
+        &self.name
     }
 
-    pub fn description(&self) -> &ConfigDescription {
+    pub fn description(&self) -> &ProductDescription {
         &self.description
     }
 }
 ```
 
-The same rule applies to commands and queries: they carry `ConfigDescription`, never `Option<ConfigDescription>`.
+The same rule applies to commands and queries: they carry `ProductDescription`, never `Option<ProductDescription>`.
 
 Domain events are different. Their payload is made of primitives because they leave the domain (see [Domain Events](domain-events.md)), so an optional description travels in an event as `Option<String>`.
 
@@ -343,78 +353,78 @@ Nullable **primitives** are fine at the boundaries, where data enters or leaves 
 | Layer | Type for an optional description |
 |---|---|
 | HTTP request / response body | `Option<String>` |
-| Response DTO (`ConfigEntryEntry`) | `Option<String>` |
+| Response DTO (`FindProductResponse`) | `Option<String>` |
 | Persistence row / document | `Option<String>` / `NULL` column |
 | Domain event payload | `Option<String>` |
-| Command, query | `ConfigDescription` |
-| Aggregate / entity | `ConfigDescription` |
+| Command, query | `ProductDescription` |
+| Aggregate / entity | `ProductDescription` |
 
-**Entering the domain** (HTTP handler builds the command):
+**Entering the domain** (the controller builds the command):
 
 ```rust
 #[derive(Deserialize)]
-pub struct CreateConfigEntryRequest {
-    pub key: String,
-    pub value: String,
+pub struct CreateProductRequest {
+    pub id: String,
+    pub name: String,
     pub description: Option<String>, // nullable primitive at the boundary: OK
 }
 
-fn to_command(
-    body: &CreateConfigEntryRequest,
-) -> Result<CreateConfigEntryCommand, ValueObjectValidationError> {
-    Ok(CreateConfigEntryCommand {
-        key: ConfigKey::new(body.key.clone())?,
-        value: ConfigValue::new(body.value.clone())?,
-        description: ConfigDescription::new(body.description.clone())?, // always a VO
+fn to_command(body: &CreateProductRequest) -> Result<CreateProductCommand, ValueObjectValidationError> {
+    Ok(CreateProductCommand {
+        id: ProductId::new(body.id.clone())?,
+        name: ProductName::new(body.name.clone())?,
+        description: ProductDescription::new(body.description.clone())?, // always a VO
     })
 }
 
-#[post("/config")]
-pub async fn handler(
-    state: web::Data<AppState>,
-    body: web::Json<CreateConfigEntryRequest>,
-) -> impl Responder {
+#[post("/products")]
+pub async fn create_product(
+    command_bus: web::Data<dyn CommandBus>,
+    body: web::Json<CreateProductRequest>,
+) -> HttpResponse {
     let command = match to_command(&body) {
         Ok(command) => command,
-        Err(e) => return HttpResponse::BadRequest().body(e.to_string()),
+        Err(error) => return HttpResponse::BadRequest().body(error.to_string()),
     };
 
-    // dispatch through the command bus...
+    // dispatch through the command bus (see CQRS)...
 }
 ```
 
 A VO validation failure at the boundary maps to **400 Bad Request**: the input was invalid, and nothing reached the domain.
 
-**Leaving the domain** (query handler maps the aggregate to a DTO):
+**Leaving the domain** (the query handler maps the aggregate to a DTO):
 
 ```rust
-ConfigEntryEntry {
-    key: entry.key().value().to_string(),
-    value: entry.value().value().to_string(),
-    description: entry.description().value().map(str::to_string),
+FindProductResponse {
+    id: product.id().value().to_string(),
+    name: product.name().value().to_string(),
+    description: product.description().value().map(str::to_string),
 }
 ```
 
-**Reconstituting from persistence** (repository maps a row back to the aggregate):
+**Reconstituting from persistence** (the repository adapter maps a row back to the aggregate):
 
 ```rust
-let description = ConfigDescription::new(row.description)
-    .map_err(|e| ConfigEntryRepositoryError::Unexpected(e.to_string()))?;
+let description = ProductDescription::new(row.description)
+    .map_err(|error| ProductError::Unexpected(error.to_string()))?;
 ```
 
 ---
 
 ## Identifiers are Value Objects too
 
-Aggregate identifiers are VOs with format validation:
+Aggregate identifiers are VOs with format validation. The caller generates them (see [CQRS](cqrs.md)), so the VO checks the format it receives:
 
 ```rust
+// libs/catalog/src/product/domain/value_objects/product_id.rs
+
 use uuid::Uuid;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct UserId(String);
+pub struct ProductId(String);
 
-impl UserId {
+impl ProductId {
     pub fn new(value: impl Into<String>) -> Result<Self, ValueObjectValidationError> {
         let value = value.into();
         Uuid::parse_str(&value).map_err(|_| {
@@ -435,69 +445,59 @@ impl UserId {
 
 ### Validation tests
 
-Each VO gets its own tests for its invariants, including the nullable path:
+Each VO gets its own tests for its invariants, including the nullable path. To build invalid input, use primitives (or primitive mothers), never a VO mother: an invalid VO can't exist.
 
 ```rust
+// tests/libs/catalog/src/product/domain/value_objects/product_name_tests.rs
+
 #[test]
-fn it_rejects_an_empty_key() {
-    assert!(ConfigKey::new("").is_err());
+fn it_rejects_a_blank_name() {
+    assert!(ProductName::new("   ").is_err());
 }
 
 #[test]
-fn it_rejects_a_key_longer_than_the_maximum() {
-    assert!(ConfigKey::new("k".repeat(129)).is_err());
+fn it_rejects_a_name_longer_than_100_characters() {
+    assert!(ProductName::new(WordMother::with_length(101)).is_err());
 }
+```
+
+```rust
+// tests/libs/catalog/src/product/domain/value_objects/product_description_tests.rs
 
 #[test]
 fn it_accepts_a_missing_description() {
-    let description = ConfigDescription::new(None).unwrap();
+    let description = ProductDescription::new(None).unwrap();
     assert!(description.is_empty());
 }
 
 #[test]
 fn it_treats_a_blank_description_as_missing() {
-    let description = ConfigDescription::new(Some("   ".to_string())).unwrap();
+    let description = ProductDescription::new(Some("   ".to_string())).unwrap();
     assert!(description.is_empty());
 }
 ```
 
 ### Object Mothers
 
-Mothers build valid VOs for tests, so tests don't repeat construction noise. A nullable VO's mother exposes both states:
+Every VO has a mother that builds valid instances for tests: `create(value)` for a concrete value, `random()` for any valid one ([Testing](testing.md#value-object-mothers)). A nullable VO's mother also exposes the absent state:
 
 ```rust
-// tests/libs/config/src/config_entry/domain/value_objects/mothers/config_key_mother.rs
+// tests/libs/catalog/src/product/domain/value_objects/mothers/product_description_mother.rs
 
-pub struct ConfigKeyMother;
+pub struct ProductDescriptionMother;
 
-impl ConfigKeyMother {
-    pub fn create(value: impl Into<String>) -> ConfigKey {
-        ConfigKey::new(value).expect("ConfigKeyMother produced an invalid key")
+impl ProductDescriptionMother {
+    pub fn create(value: Option<&str>) -> ProductDescription {
+        ProductDescription::new(value.map(str::to_string))
+            .expect("ProductDescriptionMother: invalid product description")
     }
 
-    pub fn random() -> ConfigKey {
-        Self::create(Uuid::new_v4().to_string())
-    }
-}
-```
-
-```rust
-// tests/libs/config/src/config_entry/domain/value_objects/mothers/config_description_mother.rs
-
-pub struct ConfigDescriptionMother;
-
-impl ConfigDescriptionMother {
-    pub fn create(value: Option<&str>) -> ConfigDescription {
-        ConfigDescription::new(value.map(str::to_string))
-            .expect("ConfigDescriptionMother produced an invalid description")
+    pub fn random() -> ProductDescription {
+        Self::create(Some(&WordMother::random()))
     }
 
-    pub fn random() -> ConfigDescription {
-        Self::create(Some(&Uuid::new_v4().to_string()))
-    }
-
-    pub fn empty() -> ConfigDescription {
-        ConfigDescription::empty()
+    pub fn empty() -> ProductDescription {
+        ProductDescription::empty()
     }
 }
 ```
@@ -508,10 +508,10 @@ impl ConfigDescriptionMother {
 
 | Anti-pattern | Fix |
 |---|---|
-| Raw primitives in aggregates (`key: String`) | Wrap them in a VO (`key: ConfigKey`) |
+| Raw primitives in aggregates (`name: String`) | Wrap them in a VO (`name: ProductName`) |
 | `Option<VO>` in an aggregate, command, or query | Make the VO accept `Option<T>` and model absence internally |
 | Constructor that never fails, with validation done elsewhere (controller, service) | Validate inside `new()` and return `Result` |
-| Public inner field (`pub struct ConfigKey(pub String)`) | Private field plus a `value()` getter |
+| Public inner field (`pub struct ProductName(pub String)`) | Private field plus a `value()` getter |
 | Setters or `&mut self` methods on a VO | Build a new VO instead |
 | One generic VO reused for unrelated concepts (`StringValueObject` as a field type) | One context-specific newtype per concept that wraps the generic one |
 | VO depending on HTTP, SQL, or serialization frameworks | Keep VOs pure; map at the boundaries |
