@@ -21,6 +21,7 @@ Domain events decouple the code that changes state from the code that reacts to 
 - [Defining an event](#defining-an-event)
 - [The aggregate records its events](#the-aggregate-records-its-events)
 - [Publishing from the application service](#publishing-from-the-application-service)
+- [Domain services never publish: the application wrapper does](#domain-services-never-publish-the-application-wrapper-does)
 - [Subscribers](#subscribers)
 - [Wiring: the composition root](#wiring-the-composition-root)
 - [Delivery guarantees](#delivery-guarantees)
@@ -76,11 +77,12 @@ Domain events decouple the code that changes state from the code that reacts to 
 7. **Stable event name.** Each event has a constant name `<context>.<aggregate>.<past_verb>` (for example `catalog.product.created`). It identifies the event outside the process: logs, brokers, stored events.
 8. **Reconstitution records nothing.** Rebuilding an aggregate from storage must not record events. Only real state changes do.
 9. **Subscribers live in the consuming module.** The module (or context) that reacts owns the subscriber, never the one that publishes.
-10. **Subscribers are thin.** They translate the event into a call to an application service, the same way command handlers do.
+10. **Subscribers are thin.** They translate the event into a call to an application service (never a domain service), the same way command handlers do.
 11. **Subscribers are idempotent.** The same event may be delivered more than once. Processing it twice must have the same effect as processing it once.
 12. **A subscriber failure never fails the publisher.** The fact already happened. Delivery problems are the bus's responsibility: log, retry, or use an outbox.
 13. **Events are not for invariants.** Rules that must hold atomically belong in the aggregate. Events drive side effects and eventual consistency.
 14. **The event type lives where all its users can import it.** That is the publishing module, then the context's `shared` module, then `libs/shared`, as more modules and contexts start using it.
+15. **Only the application layer publishes.** The `EventBus` is injected only into application services. Aggregates and domain services record events and never publish them. The application calls the domain and, when the domain finishes, publishes what it recorded.
 
 ---
 
@@ -477,6 +479,57 @@ A use case that modifies an existing aggregate follows the same shape: load, cal
 
 ---
 
+## Domain services never publish: the application wrapper does
+
+The `EventBus` is an application-layer tool. It is injected only into application services. Domain code (aggregates and [domain services](hexagonal-architecture.md#when-a-use-case-needs-another-use-case-domain-services)) **records** events and never **publishes** them:
+
+- **The domain never depends on a bus.** It decides what happened. When that gets announced is the application's concern.
+- **One place publishes.** Every use case reads the same way: call the domain, then publish. No event is published twice or forgotten depending on which domain service a use case happens to call.
+- **Only the application service knows when the use case has finished.** It publishes after its last write has succeeded.
+
+The application calls the domain. When the domain finishes, the application publishes the events the domain recorded:
+
+```
+ProductRenamer (application)
+├── ProductRenamer::rename (domain service)
+│   ├── Product::rename             records ProductRenamedEvent
+│   ├── ProductRepository::update
+│   └── returns the Product         the events travel inside the aggregate
+└── EventBus::publish(product.pull_domain_events())
+```
+
+```rust
+// libs/catalog/src/product/domain/services/product_renamer.rs
+// Domain service: records (through the aggregate), never publishes.
+
+pub async fn rename(&self, id: &ProductId, name: ProductName) -> Result<Product, ProductError> {
+    let mut product = self.finder.find(id).await?;
+
+    product.rename(name); // records ProductRenamedEvent
+    self.repository.update(&product).await?;
+
+    Ok(product) // the recorded events go back to the caller inside the aggregate
+}
+```
+
+```rust
+// libs/catalog/src/product/application/rename_product/product_renamer.rs
+// Application wrapper: calls the domain service, then publishes what it recorded.
+
+pub async fn execute(&self, id: ProductId, name: ProductName) -> Result<(), ProductError> {
+    let mut product = self.renamer.rename(&id, name).await?;
+
+    self.event_bus.publish(product.pull_domain_events()).await;
+
+    Ok(())
+}
+```
+
+- **A domain service that changes aggregates returns them**, so their recorded events reach the application. A domain service that returns `()` after changing an aggregate loses its events.
+- **When a handler or a subscriber needs a domain service, it gets its own application service.** That service is a wrapper with the same input: it calls the domain service and, when it finishes, publishes the events. Handlers and subscribers never call the domain service directly (see [CQRS](cqrs.md#handlers-never-call-domain-services) for the full example, with its handler).
+
+---
+
 ## Subscribers
 
 A subscriber reacts to one event type and delegates to an application service of its own module. It takes primitives from the event and builds its own module's Value Objects.
@@ -642,6 +695,8 @@ fn it_records_nothing_when_renamed_to_the_same_name() {
 | Events carrying Value Objects or entities | Primitive payload; consumers build their own VOs |
 | Recording events when loading from storage | Separate `create` (records) from `reconstitute` (records nothing) |
 | Business logic inside a subscriber | Delegate to an application service in the consuming module |
+| `EventBus` injected into a domain service, or a domain service publishing | The domain service returns the aggregate; the application service publishes its events |
+| A handler or subscriber calling a domain service directly | An application wrapper calls the domain service, then publishes |
 | Subscriber placed in the publishing module | It belongs to the module that reacts |
 | Consumer importing the event from the publishing module | Move the event to the context's `shared` module (or `libs/shared` across contexts) |
 | Non-idempotent subscriber | Deduplicate by `event_id` or make the effect naturally idempotent |
@@ -659,6 +714,7 @@ fn it_records_nothing_when_renamed_to_the_same_name() {
 - [ ] The aggregate records the event inside the behaviour that changes state; no-op changes record nothing
 - [ ] `reconstitute` records nothing
 - [ ] The application service saves first, then publishes `pull_domain_events()`
+- [ ] Only application services receive the `EventBus`; domain services return the aggregates they changed
 - [ ] The event type lives in the publishing module, the context's `shared` module, or `libs/shared`, depending on who uses it
 - [ ] The subscriber lives in the consuming module, is named `ReactionOnNounPast`, and delegates to an application service
 - [ ] The subscriber is idempotent

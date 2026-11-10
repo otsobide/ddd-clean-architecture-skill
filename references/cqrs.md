@@ -23,6 +23,7 @@ Each kind travels its own path: its own message type, its own handler, and its o
 - [In-memory buses](#in-memory-buses)
 - [Command use case example](#command-use-case-example)
 - [Query use case example](#query-use-case-example)
+- [Handlers never call domain services](#handlers-never-call-domain-services)
 - [Wiring: the composition root](#wiring-the-composition-root)
 - [Dispatching from an entry point](#dispatching-from-an-entry-point)
 - [Testing](#testing)
@@ -86,6 +87,7 @@ CQRS does **not** require separate databases, event sourcing, or asynchronous pr
 
    The buses are injected into the application service, never into the handler (see [Dependency Injection](dependency-injection.md)).
 9. **The bus is a port.** Bus traits live in the shared domain. Implementations (in-memory, broker-backed...) live in infrastructure. Entry points depend only on the traits.
+10. **Handlers only call application services, never domain services.** Running use cases and publishing their events belongs to the application layer. When the logic a handler needs lives in a domain service, an application service wraps it (see [Handlers never call domain services](#handlers-never-call-domain-services)).
 
 ---
 
@@ -513,6 +515,113 @@ The finder returns the aggregate so it can be reused by other use cases. The han
 
 ---
 
+## Handlers never call domain services
+
+When logic is needed by more than one use case, it moves to the domain as a **domain service** ([Hexagonal Architecture](hexagonal-architecture.md#when-a-use-case-needs-another-use-case-domain-services)). A domain service is a building block, not an entry point:
+
+- It doesn't publish events. The `EventBus` belongs to the application layer ([Domain Events](domain-events.md#domain-services-never-publish-the-application-wrapper-does)).
+- It doesn't know about messages or buses.
+- It is reused by several application services, and each of those decides what happens around it.
+
+So a handler never holds a domain service, even when the use case would do nothing but call it:
+
+```rust
+// ✗ A handler calling a domain service directly
+pub struct RenameProductCommandHandler {
+    renamer: DomainProductRenamer, // the events it records are never published
+}
+```
+
+The handler would either lose the events the aggregate recorded, or take over the application service's job and publish them itself. Both break the layers.
+
+Instead, give the message its **own application service, a wrapper around the domain service**. It takes the same input, calls the domain service and, once that finishes, does the application work: publish the recorded events for a command, or hand back the result for a query.
+
+```
+RenameProductCommandHandler
+└── ProductRenamer (application)            wrapper: same input as the domain service
+    ├── ProductRenamer (domain service)     finds, renames, persists; returns the aggregate
+    └── EventBus::publish                   publishes what the aggregate recorded
+```
+
+```rust
+// libs/catalog/src/product/domain/services/product_renamer.rs
+
+/// Domain service: renames and persists the product.
+/// Publishes nothing: the recorded events stay in the returned aggregate.
+pub struct ProductRenamer {
+    finder: ProductFinder,
+    repository: Arc<dyn ProductRepository>,
+}
+
+impl ProductRenamer {
+    pub fn new(finder: ProductFinder, repository: Arc<dyn ProductRepository>) -> Self {
+        Self { finder, repository }
+    }
+
+    pub async fn rename(&self, id: &ProductId, name: ProductName) -> Result<Product, ProductError> {
+        let mut product = self.finder.find(id).await?;
+
+        product.rename(name);
+        self.repository.update(&product).await?;
+
+        Ok(product)
+    }
+}
+```
+
+```rust
+// libs/catalog/src/product/application/rename_product/product_renamer.rs
+
+use crate::product::domain::services::product_renamer::ProductRenamer as DomainProductRenamer;
+
+/// Application service: wraps the domain service and publishes what it recorded.
+pub struct ProductRenamer {
+    renamer: DomainProductRenamer,
+    event_bus: Arc<dyn EventBus>,
+}
+
+impl ProductRenamer {
+    pub fn new(renamer: DomainProductRenamer, event_bus: Arc<dyn EventBus>) -> Self {
+        Self { renamer, event_bus }
+    }
+
+    pub async fn execute(&self, id: ProductId, name: ProductName) -> Result<(), ProductError> {
+        let mut product = self.renamer.rename(&id, name).await?;
+
+        self.event_bus.publish(product.pull_domain_events()).await;
+
+        Ok(())
+    }
+}
+```
+
+```rust
+// libs/catalog/src/product/application/rename_product/rename_product_command_handler.rs
+
+pub struct RenameProductCommandHandler {
+    renamer: ProductRenamer, // the application service, never the domain one
+}
+
+impl RenameProductCommandHandler {
+    pub fn new(renamer: ProductRenamer) -> Self {
+        Self { renamer }
+    }
+}
+
+#[async_trait]
+impl CommandHandler<RenameProductCommand> for RenameProductCommandHandler {
+    type Error = ProductError;
+
+    async fn handle(&self, command: RenameProductCommand) -> Result<(), ProductError> {
+        self.renamer.execute(command.id, command.name).await
+    }
+}
+```
+
+Queries follow the same rule. When finding a product moves to a domain `ProductFinder`, `FindProductQueryHandler` keeps calling the application `ProductFinder`, which now just forwards to the domain one. The wrapper is thin, but it keeps one rule with no exceptions: **handler → application service → domain**.
+
+---
+
 ## Wiring: the composition root
 
 Handlers are built and registered once, at startup, in a single place: the composition root. Dependencies are injected manually as `Arc<dyn Trait>`.
@@ -635,6 +744,7 @@ The response downcast cannot fail when the wiring is correct: each query type ha
 | Command that returns the created entity or its generated ID | The caller generates the ID, then issues a query if it needs data |
 | Query that writes ("find or create", "touch last access") | Split it into a command and a query |
 | Business rules inside a handler | Move them to the aggregate or the application service |
+| A handler holding a domain service | Wrap the domain service in an application service; the handler calls the wrapper |
 | Query handler returning an aggregate | Map it to a response DTO of primitives |
 | One handler for several messages, or several handlers for one message | Exactly one handler per command or query |
 | A use case calling another module's application service or repository | Ask a query or dispatch a command through an injected bus, or react to a domain event |
@@ -649,7 +759,7 @@ The response downcast cannot fail when the wiring is correct: each query type ha
 - [ ] The use case has its own folder `application/<verb>_<noun>/`
 - [ ] Message, handler, application service and (for queries) response follow the naming conventions
 - [ ] Message fields are Value Objects; IDs for new aggregates come from the caller
-- [ ] The handler only unpacks, delegates, and maps
+- [ ] The handler only unpacks, delegates to an application service (never a domain service), and maps
 - [ ] The query handler maps the aggregate to a primitive-only response DTO
 - [ ] Domain events are published by command use cases only, after the state change succeeds
 - [ ] The handler is registered once in the composition root

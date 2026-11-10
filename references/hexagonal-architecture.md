@@ -706,6 +706,7 @@ Typical domain services:
 5. **They are stateless:** they hold dependencies, never data between calls.
 6. **Their method is named after the operation** (`find`, `ensure_name_is_free`), not `execute`. They are building blocks, not entry points.
 7. **They never cross module boundaries.** Another module that needs the same answer asks a query through the `QueryBus` ([Dependency Injection](dependency-injection.md)).
+8. **Handlers and subscribers never call them.** A handler or subscriber that needs a domain service gets an application service wrapping it: same input, calls the domain service, then publishes the recorded events ([CQRS](cqrs.md#handlers-never-call-domain-services), [Domain Events](domain-events.md#domain-services-never-publish-the-application-wrapper-does)).
 
 ---
 
@@ -754,6 +755,7 @@ Because use cases depend only on traits, every application test runs in memory a
 | The same lookup or check copied into several use cases | One domain service in `domain/services/` |
 | Business rules in the application service | Move them into the aggregate or a Value Object |
 | Domain service receiving a bus or publishing events | The aggregate records, the application service publishes |
+| A handler or subscriber calling a domain service | Wrap it in an application service that publishes when it finishes |
 | Domain importing actix-web, sqlx or reqwest | Keep frameworks in infrastructure and apps |
 | Domain service hidden behind a trait "just in case" | Traits are for boundaries with several implementations; domain services are concrete |
 | A module using another module's domain service | Ask a query through the `QueryBus` |
