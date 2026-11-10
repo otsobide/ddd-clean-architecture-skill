@@ -35,3 +35,5 @@ git clone https://github.com/otsobide/ddd-clean-architecture-skill.git ~/.claude
 ```
 
 To install it for a single project, clone it into `.claude/skills/ddd-clean-architecture` inside that project instead.
+
+To pin a version, add `--branch v1.0.0` to the clone command. To update, run `git pull` (or check out a newer tag) inside the skill's folder. The [CHANGELOG](CHANGELOG.md) lists what changed in each version.
