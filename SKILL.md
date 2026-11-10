@@ -14,3 +14,5 @@ description: TODO — what this skill does and when it should trigger.
 ## Examples
 
 ## References
+
+- [Value Objects](references/value-objects.md): validated, immutable domain primitives. Nullable concepts are modelled inside the VO, never as `Option<VO>` in aggregates.
